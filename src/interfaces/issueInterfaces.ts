@@ -112,6 +112,7 @@ export interface IJiraSearchResults {
     startAt: number
     total: number
     account: IJiraIssueAccountSettings
+    nextPageToken?: string
 }
 
 export interface IJiraStatus {

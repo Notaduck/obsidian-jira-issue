@@ -23,9 +23,14 @@ describe('JiraClient', () => {
             expect(await JiraClient.testConnection(TestAccountOpen)).toEqual(true)
             expect(requestUrlMock.mock.calls[0][0]).toEqual({
                 contentType: 'application/json',
-                headers: {},
+                headers: {
+                    'Accept': 'application/json',
+                    'Content-Type': 'application/json',
+                    'User-Agent': 'obsidian-jira-issue-plugin',
+                    'X-Atlassian-Token': 'no-check',
+                },
                 method: 'GET',
-                url: 'https://test-company.atlassian.net/rest/api/latest/project',
+                url: 'https://test-company.atlassian.net/rest/api/3/project',
             })
         })
     })
@@ -37,12 +42,17 @@ describe('JiraClient', () => {
             try {
                 await JiraClient.testConnection(TestAccountOpen)
             } catch (e) {
-                expect(e).toEqual(new Error(`HTTP status 401`))
+                expect(e).toEqual(new Error(`Unauthorized: Please check your authentication credentials`))
                 expect(requestUrlMock.mock.calls[0][0]).toEqual({
                     contentType: 'application/json',
-                    headers: {},
+                    headers: {
+                        'Accept': 'application/json',
+                        'Content-Type': 'application/json',
+                        'User-Agent': 'obsidian-jira-issue-plugin',
+                        'X-Atlassian-Token': 'no-check',
+                    },
                     method: 'GET',
-                    url: 'https://test-company.atlassian.net/rest/api/latest/project',
+                    url: 'https://test-company.atlassian.net/rest/api/3/project',
                 })
             }
         })
