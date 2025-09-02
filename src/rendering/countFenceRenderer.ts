@@ -27,7 +27,7 @@ export const CountFenceRenderer = async (source: string, el: HTMLElement, ctx: M
         }
     } else {
         RC.renderLoadingItem('Loading...')
-        JiraClient.getSearchResults(searchView.query, { limit: 1 }).then(newSearchResults => {
+        JiraClient.getSearchResults(searchView.query, { limit: 1, fields: ["*all"] }).then(newSearchResults => {
             const searchResults = ObjectsCache.add(searchView.getCacheKey(), newSearchResults).data as IJiraSearchResults
             renderSearchCount(el, searchResults, searchView)
         }).catch(err => {

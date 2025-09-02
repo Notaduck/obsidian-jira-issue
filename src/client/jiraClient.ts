@@ -9,6 +9,7 @@ interface RequestOptions {
     queryParameters?: URLSearchParams
     account?: IJiraIssueAccountSettings
     noBasePath?: boolean
+    body?: string
 }
 
 function getMimeType(imageBuffer: ArrayBuffer): string {
@@ -55,7 +56,12 @@ function base64Encode(s: string) {
 
 function buildUrl(host: string, requestOptions: RequestOptions): string {
     const basePath = requestOptions.noBasePath ? '' : SettingsData.apiBasePath
-    const url = new URL(`${host}${basePath}${requestOptions.path}`)
+    // Normalize URL parts to prevent double slashes
+    const normalizedHost = host.endsWith('/') ? host.slice(0, -1) : host
+    const normalizedBasePath = basePath ? (basePath.startsWith('/') ? basePath : '/' + basePath) : ''
+    const normalizedPath = requestOptions.path.startsWith('/') ? requestOptions.path : '/' + requestOptions.path
+    
+    const url = new URL(`${normalizedHost}${normalizedBasePath}${normalizedPath}`)
     if (requestOptions.queryParameters) {
         url.search = requestOptions.queryParameters.toString()
     }
@@ -69,6 +75,8 @@ function buildHeaders(account: IJiraIssueAccountSettings): Record<string, string
     } else if (account.authenticationType === EAuthenticationTypes.BEARER_TOKEN) {
         requestHeaders['Authorization'] = `Bearer ${account.bareToken}`
     }
+    // Add XSRF protection bypass for Jira Cloud API POST requests
+    requestHeaders['X-Atlassian-Token'] = 'no-check'
     return requestHeaders
 }
 
@@ -93,19 +101,24 @@ async function sendRequest(requestOptions: RequestOptions): Promise<any> {
         }
     }
 
-    if (response && response.headers && response.headers['content-type'].contains('json') && response.json && response.json.errorMessages) {
+    if (response && response.headers && response.headers['content-type'] && response.headers['content-type'].contains('json') && response.json && response.json.errorMessages) {
         throw new Error(response.json.errorMessages.join('\n'))
     } else if (response && response.status) {
         switch (response.status) {
             case 400:
-                throw new Error(`The query is not valid`)
+                throw new Error(`Bad Request: The query is not valid`)
+            case 401:
+                throw new Error(`Unauthorized: Please check your authentication credentials`)
+            case 403:
+                throw new Error(`Forbidden: You don't have permission to access this resource. Check your API token permissions and Jira project access.`)
             case 404:
-                throw new Error(`Issue does not exist`)
+                throw new Error(`Not Found: Issue does not exist`)
             default:
-                throw new Error(`HTTP status ${response.status}`)
+                const errorMsg = response.json && response.json.message ? response.json.message : `HTTP ${response.status}`
+                throw new Error(`Jira API ${response.status} Error: ${errorMsg}`)
         }
     } else {
-        throw new Error(response as any)
+        throw new Error(`Unknown error occurred: ${JSON.stringify(response)}`)
     }
 }
 
@@ -114,17 +127,51 @@ async function sendRequestWithAccount(account: IJiraIssueAccountSettings, reques
     const requestUrlParam: RequestUrlParam = {
         method: requestOptions.method,
         url: buildUrl(account.host, requestOptions),
-        headers: buildHeaders(account),
+        headers: {
+            ...buildHeaders(account),
+            'Accept': 'application/json',
+            'Content-Type': 'application/json',
+            // CRITICAL: User-Agent header is required as of August 2025 due to Atlassian's 
+            // enhanced API security. Without this header, requests return 403 Forbidden.
+            // This was enforced around the API migration deadline (August 1, 2025).
+            'User-Agent': 'obsidian-jira-issue-plugin'
+        },
         contentType: 'application/json',
     }
+    
+    // Add body for POST requests
+    if (requestOptions.body) {
+        requestUrlParam.body = requestOptions.body
+    }
+    
     try {
+
         response = await requestUrl(requestUrlParam)
+        
         SettingsData.logRequestsResponses && console.info('JiraIssue:Fetch:', { request: requestUrlParam, response })
     } catch (errorResponse) {
+        console.error('JiraIssue:Request Failed:', {
+            request: {
+                method: requestUrlParam.method,
+                url: requestUrlParam.url,
+                headers: requestUrlParam.headers
+            },
+            error: {
+                status: errorResponse.status,
+                headers: errorResponse.headers,
+                json: errorResponse.json,
+                message: errorResponse.message
+            }
+        })
+        
         SettingsData.logRequestsResponses && console.warn('JiraIssue:Fetch:', { request: requestUrlParam, response: errorResponse })
         response = errorResponse
     }
     return response
+}
+
+async function sendRequestWithBody(requestOptions: RequestOptions): Promise<any> {
+    return sendRequest(requestOptions)
 }
 
 async function preFetchImage(account: IJiraIssueAccountSettings, url: string): Promise<string> {
@@ -195,27 +242,43 @@ export default {
         return issue
     },
 
-    async getSearchResults(query: string, options: { limit?: number, offset?: number, fields?: string[], account?: IJiraIssueAccountSettings } = {}): Promise<IJiraSearchResults> {
+    async getSearchResults(query: string, options: { limit?: number, offset?: number, fields?: string[], account?: IJiraIssueAccountSettings, nextPageToken?: string } = {}): Promise<IJiraSearchResults> {
         const opt = {
             fields: options.fields || [],
             offset: options.offset || 0,
             limit: options.limit || 50,
             account: options.account || null,
+            nextPageToken: options.nextPageToken || null,
         }
-        const queryParameters = new URLSearchParams({
+        
+        // Use POST for new JQL endpoint with token-based pagination
+        const requestBody: any = {
             jql: query,
-            fields: opt.fields.join(','),
-            startAt: opt.offset > 0 ? opt.offset.toString() : '',
-            maxResults: opt.limit > 0 ? opt.limit.toString() : '',
-        })
-        const searchResults = await sendRequest(
-            {
-                method: 'GET',
-                path: `/search`,
-                queryParameters: queryParameters,
-                account: opt.account,
-            }
-        ) as IJiraSearchResults
+            fields: opt.fields.length > 0 ? opt.fields : ["*all"],
+            maxResults: opt.limit > 0 ? opt.limit : 50,
+        }
+        
+        // Add pagination token if provided
+        if (opt.nextPageToken) {
+            requestBody.startAt = opt.nextPageToken
+        } else if (opt.offset > 0) {
+            // Fallback for backward compatibility - convert offset to startAt
+            requestBody.startAt = opt.offset
+        }
+        
+        const requestOptions = {
+            method: 'POST',
+            path: `/search/jql`,
+            account: opt.account,
+            body: JSON.stringify(requestBody),
+            noBasePath: true, // Use hardcoded path for new JQL endpoint
+        }
+        
+        // Override the path to use the correct API v3 endpoint for JQL
+        requestOptions.path = '/rest/api/3/search/jql'
+        
+        const searchResults = await sendRequestWithBody(requestOptions) as IJiraSearchResults
+        
         for (const issue of searchResults.issues) {
             issue.account = searchResults.account
             await fetchIssueImages(issue)
